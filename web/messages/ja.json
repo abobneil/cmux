@@ -613,7 +613,7 @@
       "python": "Python",
       "nodejs": "Node.js",
       "tmuxPassthrough": "tmuxパススルー",
-      "tmuxDesc": "cmux内でtmuxを使用する場合、パススルーを有効にしてください：",
+      "tmuxDesc": "cmux ssh内では、フックやスクリプトからcmux notifyを使うのがおすすめです。tmuxペイン内からでもローカルのcmuxアプリへリレーされます。tmux内の生のOSC通知にはパススルーを有効にしてください：",
       "metaTitle": "通知"
     },
     "browserAutomation": {

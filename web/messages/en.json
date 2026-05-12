@@ -658,7 +658,7 @@
       "python": "Python",
       "nodejs": "Node.js",
       "tmuxPassthrough": "tmux passthrough",
-      "tmuxDesc": "If using tmux inside cmux, enable passthrough:"
+      "tmuxDesc": "Inside cmux ssh, prefer cmux notify from hooks and scripts; it relays through your local cmux app even from tmux panes. For raw OSC notifications inside tmux, enable passthrough:"
     },
     "browserAutomation": {
       "title": "Browser Automation",
@@ -763,7 +763,7 @@
       "dragDropTitle": "Drag and drop",
       "dragDropDesc": "Drag an image or file into a remote terminal and cmux uploads it via scp through the existing SSH connection. cmux detects the foreground SSH process by TTY and routes the upload through ControlMaster multiplexing.",
       "notificationsTitle": "Notifications",
-      "notificationsDesc": "Processes on the remote machine can run cmux commands that execute on your local instance. When a coding agent calls cmux notify on the remote box, the notification appears in your local sidebar. The blue ring lights up on the workspace tab. Cmd+Shift+U jumps to it. Notification spam from flaky connections is suppressed with a per-host cooldown.",
+      "notificationsDesc": "Processes on the remote machine can run cmux commands that execute on your local instance. When a coding agent calls cmux notify on the remote box, including from inside tmux, the notification appears in your local sidebar. The blue ring lights up on the workspace tab. Cmd+Shift+U jumps to it. Notification spam from flaky connections is suppressed with a per-host cooldown.",
       "agentsTitle": "Coding agents over SSH",
       "agentsDesc": "cmux claude-teams and cmux omo both work inside SSH sessions. The Go relay daemon on the remote host handles the same tmux-compat translation that the local Swift CLI does. Teammate agents spawn as native cmux splits on your local machine while computation runs on the remote box.",
       "reconnectTitle": "Reconnect",
