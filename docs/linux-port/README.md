@@ -166,6 +166,7 @@ Required work:
 - Continue reading Ghostty config for theme/font/color compatibility where practical.
 - Evaluate replacing VTE with Ghostty/libghostty if Linux embedding is viable and distributable on Arch.
 - Document findings, blockers, and packaging implications.
+- Current decision: keep VTE as the supported Linux backend until Ghostty exposes a stable, packaging-friendly Linux embedding API. See [Ghostty compatibility evaluation](./ghostty-evaluation.md).
 
 Acceptance criteria:
 
