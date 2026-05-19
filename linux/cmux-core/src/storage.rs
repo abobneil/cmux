@@ -1,26 +1,96 @@
 //! XDG-backed persistence for Linux cmux state.
 
 use crate::{
-    session::{AgentKind, SessionStatus, WorkspaceSession},
+    session::{AgentKind, AppSessionState, Pane, SessionStatus, WorkspaceModel, WorkspaceSession},
     terminal::{TerminalCommand, TerminalSession},
 };
 use serde::{Deserialize, Serialize};
 use std::{fs, io, path::PathBuf};
 use thiserror::Error;
 
+pub const CURRENT_STATE_VERSION: u32 = 2;
+
 #[derive(Debug, Error)]
 pub enum StorageError {
-    #[error("could not resolve an XDG config directory")]
-    MissingConfigDirectory,
+    #[error("could not resolve an XDG state directory")]
+    MissingStateDirectory,
     #[error("io error: {0}")]
     Io(#[from] io::Error),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedState {
+    #[serde(default = "current_state_version")]
+    pub version: u32,
+    #[serde(default)]
+    pub workspaces: Vec<SavedWorkspace>,
+    #[serde(default)]
+    pub active_workspace_id: Option<String>,
+    #[serde(default)]
     pub sessions: Vec<SavedSession>,
+}
+
+impl Default for SavedState {
+    fn default() -> Self {
+        Self {
+            version: CURRENT_STATE_VERSION,
+            workspaces: Vec::new(),
+            active_workspace_id: None,
+            sessions: Vec::new(),
+        }
+    }
+}
+
+impl SavedState {
+    #[must_use]
+    pub fn migrated(mut self) -> Self {
+        if self.workspaces.is_empty() && !self.sessions.is_empty() {
+            let active_session_id = self.sessions.first().map(|session| session.id.clone());
+            let panes = active_session_id
+                .as_ref()
+                .map(|session_id| SavedPane {
+                    id: format!("pane-{session_id}"),
+                    session_id: session_id.clone(),
+                })
+                .into_iter()
+                .collect();
+
+            self.workspaces.push(SavedWorkspace {
+                id: "default".to_string(),
+                title: "Default".to_string(),
+                sessions: std::mem::take(&mut self.sessions),
+                panes,
+                active_session_id,
+            });
+            self.active_workspace_id = Some("default".to_string());
+        }
+        self.version = CURRENT_STATE_VERSION;
+        self
+    }
+}
+
+fn current_state_version() -> u32 {
+    CURRENT_STATE_VERSION
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedWorkspace {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub sessions: Vec<SavedSession>,
+    #[serde(default)]
+    pub panes: Vec<SavedPane>,
+    #[serde(default)]
+    pub active_session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedPane {
+    pub id: String,
+    pub session_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +171,76 @@ impl From<SavedSession> for WorkspaceSession {
     }
 }
 
+impl From<&WorkspaceModel> for SavedWorkspace {
+    fn from(workspace: &WorkspaceModel) -> Self {
+        Self {
+            id: workspace.id.clone(),
+            title: workspace.title.clone(),
+            sessions: workspace
+                .sessions()
+                .iter()
+                .map(SavedSession::from)
+                .collect(),
+            panes: workspace
+                .panes()
+                .iter()
+                .map(|pane| SavedPane {
+                    id: pane.id.clone(),
+                    session_id: pane.session_id.clone(),
+                })
+                .collect(),
+            active_session_id: workspace.active_session_id().map(ToString::to_string),
+        }
+    }
+}
+
+impl From<SavedWorkspace> for WorkspaceModel {
+    fn from(workspace: SavedWorkspace) -> Self {
+        let mut model = WorkspaceModel::new(workspace.id, workspace.title);
+        for session in workspace.sessions {
+            model.push_session(session.into());
+        }
+        if let Some(active_session_id) = workspace.active_session_id {
+            model.set_active_session(&active_session_id);
+        }
+        for pane in workspace.panes {
+            if !model.panes().iter().any(|existing| existing.id == pane.id) {
+                model.push_pane(Pane::new(pane.id, pane.session_id));
+            }
+        }
+        model
+    }
+}
+
+impl From<&AppSessionState> for SavedState {
+    fn from(state: &AppSessionState) -> Self {
+        Self {
+            version: CURRENT_STATE_VERSION,
+            workspaces: state
+                .workspaces()
+                .iter()
+                .map(SavedWorkspace::from)
+                .collect(),
+            active_workspace_id: state.active_workspace_id().map(ToString::to_string),
+            sessions: Vec::new(),
+        }
+    }
+}
+
+impl From<SavedState> for AppSessionState {
+    fn from(state: SavedState) -> Self {
+        let mut app_state = AppSessionState::new();
+        let state = state.migrated();
+        for workspace in state.workspaces {
+            app_state.push_workspace(workspace.into());
+        }
+        if let Some(active_workspace_id) = state.active_workspace_id {
+            app_state.set_active_workspace(&active_workspace_id);
+        }
+        app_state
+    }
+}
+
 impl From<&AgentKind> for SavedAgentKind {
     fn from(agent: &AgentKind) -> Self {
         match agent {
@@ -149,15 +289,15 @@ pub struct StateStore {
 }
 
 impl StateStore {
-    /// Create a store using the current user's XDG config directory.
+    /// Create a store using the current user's XDG state directory.
     ///
     /// # Errors
     ///
-    /// Returns an error if the XDG config directory cannot be resolved.
+    /// Returns an error if the XDG state directory cannot be resolved.
     pub fn xdg() -> Result<Self, StorageError> {
-        let config_dir = dirs::config_dir().ok_or(StorageError::MissingConfigDirectory)?;
+        let state_dir = dirs::state_dir().ok_or(StorageError::MissingStateDirectory)?;
         Ok(Self {
-            path: config_dir.join("cmux").join("state.json"),
+            path: state_dir.join("cmux").join("state.json"),
         })
     }
 
@@ -166,7 +306,7 @@ impl StateStore {
         Self { path: path.into() }
     }
 
-    /// Load saved state from disk.
+    /// Load saved state from disk and migrate it to the current shape.
     ///
     /// # Errors
     ///
@@ -176,21 +316,42 @@ impl StateStore {
             return Ok(SavedState::default());
         }
         let bytes = fs::read(&self.path)?;
-        Ok(serde_json::from_slice(&bytes)?)
+        Ok(serde_json::from_slice::<SavedState>(&bytes)?.migrated())
     }
 
-    /// Save state to disk, creating parent directories as needed.
+    /// Load saved state, recovering corrupt JSON by renaming it aside.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read or a corrupt file cannot be
+    /// renamed out of the way.
+    pub fn load_or_recover(&self) -> Result<SavedState, StorageError> {
+        match self.load() {
+            Ok(state) => Ok(state),
+            Err(StorageError::Json(_)) => {
+                let corrupt_path = self.path.with_extension("json.corrupt");
+                fs::rename(&self.path, corrupt_path)?;
+                Ok(SavedState::default())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Save state to disk atomically, creating parent directories as needed.
     ///
     /// # Errors
     ///
     /// Returns an error if the directory cannot be created, the state cannot be
-    /// encoded, or the file cannot be written.
+    /// encoded, or the file cannot be written/renamed.
     pub fn save(&self, state: &SavedState) -> Result<(), StorageError> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let bytes = serde_json::to_vec_pretty(state)?;
-        fs::write(&self.path, bytes)?;
+        let state = state.clone().migrated();
+        let bytes = serde_json::to_vec_pretty(&state)?;
+        let tmp_path = self.path.with_extension("json.tmp");
+        fs::write(&tmp_path, bytes)?;
+        fs::rename(tmp_path, &self.path)?;
         Ok(())
     }
 }
@@ -199,9 +360,17 @@ impl StateStore {
 mod tests {
     use super::*;
 
+    fn test_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "cmux-{name}-{}-{}.json",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ))
+    }
+
     #[test]
     fn missing_state_defaults_empty() {
-        let store = StateStore::at("/tmp/cmux-test-state-that-should-not-exist.json");
+        let store = StateStore::at(test_path("missing"));
         assert_eq!(store.load().unwrap(), SavedState::default());
     }
 
@@ -218,8 +387,12 @@ mod tests {
         }"#;
 
         let state: SavedState = serde_json::from_str(json).unwrap();
-        assert_eq!(state.sessions[0].agent, SavedAgentKind::Shell);
-        assert_eq!(state.sessions[0].status, SavedSessionStatus::Running);
+        let state = state.migrated();
+        let session = &state.workspaces[0].sessions[0];
+        assert_eq!(session.agent, SavedAgentKind::Shell);
+        assert_eq!(session.status, SavedSessionStatus::Running);
+        assert_eq!(state.version, CURRENT_STATE_VERSION);
+        assert_eq!(state.active_workspace_id.as_deref(), Some("default"));
     }
 
     #[test]
@@ -239,5 +412,73 @@ mod tests {
         let restored = WorkspaceSession::from(saved);
         assert_eq!(restored.agent, AgentKind::Claude);
         assert_eq!(restored.terminal.command.program, "claude");
+    }
+
+    #[test]
+    fn app_state_round_trips_workspaces_sessions_and_active_ids() {
+        let mut workspace = WorkspaceModel::new("workspace-1", "Workspace 1");
+        workspace.push_session(WorkspaceSession::shell("session-1", "Shell"));
+        workspace.push_session(WorkspaceSession::with_command(
+            "session-2",
+            "Codex",
+            AgentKind::Codex,
+            TerminalCommand {
+                program: "codex".to_string(),
+                args: vec!["--ask-for-approval=never".to_string()],
+                working_directory: None,
+            },
+        ));
+        assert!(workspace.set_active_session("session-2"));
+
+        let mut app_state = AppSessionState::new();
+        app_state.push_workspace(workspace);
+
+        let saved = SavedState::from(&app_state);
+        let restored = AppSessionState::from(saved);
+        let restored_workspace = restored.active_workspace().unwrap();
+
+        assert_eq!(restored_workspace.id, "workspace-1");
+        assert_eq!(restored_workspace.active_session_id(), Some("session-2"));
+        assert_eq!(restored_workspace.sessions()[1].agent, AgentKind::Codex);
+    }
+
+    #[test]
+    fn save_writes_versioned_state_atomically() {
+        let path = test_path("save");
+        let store = StateStore::at(&path);
+        let state = SavedState {
+            sessions: vec![SavedSession {
+                id: "one".to_string(),
+                title: "One".to_string(),
+                program: "/bin/sh".to_string(),
+                args: Vec::new(),
+                working_directory: None,
+                agent: SavedAgentKind::Shell,
+                status: SavedSessionStatus::Running,
+            }],
+            ..SavedState::default()
+        };
+
+        store.save(&state).unwrap();
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.version, CURRENT_STATE_VERSION);
+        assert!(loaded.sessions.is_empty());
+        assert_eq!(loaded.workspaces[0].sessions[0].id, "one");
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn corrupt_state_is_renamed_and_defaults_empty() {
+        let path = test_path("corrupt");
+        fs::write(&path, b"not json").unwrap();
+        let store = StateStore::at(&path);
+
+        let recovered = store.load_or_recover().unwrap();
+
+        assert_eq!(recovered, SavedState::default());
+        assert!(!path.exists());
+        assert!(path.with_extension("json.corrupt").exists());
+        let _ = fs::remove_file(path.with_extension("json.corrupt"));
     }
 }
