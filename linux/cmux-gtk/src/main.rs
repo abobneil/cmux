@@ -6,8 +6,8 @@ use std::{cell::RefCell, rc::Rc};
 use adw::prelude::*;
 use cmux_core::{
     agent::AgentCommand,
+    session::WorkspaceSession,
     storage::{SavedSession, SavedState, StateStore},
-    terminal::{TerminalCommand, TerminalSession},
     APP_ID,
 };
 use gtk::{gio, glib};
@@ -44,7 +44,7 @@ fn build_ui(app: &adw::Application) {
 
     let store = StateStore::xdg().ok();
     let initial_sessions = load_sessions(store.as_ref());
-    let sessions = Rc::new(RefCell::new(Vec::<TerminalSession>::new()));
+    let sessions = Rc::new(RefCell::new(Vec::<WorkspaceSession>::new()));
 
     for session in initial_sessions {
         append_session(&sidebar, &terminal_stack, &sessions, session);
@@ -60,7 +60,7 @@ fn build_ui(app: &adw::Application) {
             };
             let index = usize::try_from(row.index()).expect("GTK row indexes are non-negative");
             if let Some(session) = sessions.borrow().get(index) {
-                terminal_stack.set_visible_child_name(&session.id);
+                terminal_stack.set_visible_child_name(&session.terminal.id);
             }
         });
     }
@@ -133,7 +133,7 @@ fn install_new_session_action(
     command: impl Fn() -> AgentCommand + 'static,
     sidebar: &gtk::ListBox,
     terminal_stack: &gtk::Stack,
-    sessions: &Rc<RefCell<Vec<TerminalSession>>>,
+    sessions: &Rc<RefCell<Vec<WorkspaceSession>>>,
 ) {
     let sidebar = sidebar.clone();
     let terminal_stack = terminal_stack.clone();
@@ -141,7 +141,13 @@ fn install_new_session_action(
     let action = gio::SimpleAction::new(name, None);
     action.connect_activate(move |_, _| {
         let next = sessions.borrow().len() + 1;
-        let session = command().into_terminal_session(format!("session-{next}"));
+        let command = command();
+        let session = WorkspaceSession::with_command(
+            format!("session-{next}"),
+            command.title,
+            command.kind,
+            command.command,
+        );
         append_session(&sidebar, &terminal_stack, &sessions, session);
         let last_index =
             i32::try_from(sessions.borrow().len() - 1).expect("session count fits i32");
@@ -150,8 +156,8 @@ fn install_new_session_action(
     app.add_action(&action);
 }
 
-fn load_sessions(store: Option<&StateStore>) -> Vec<TerminalSession> {
-    let sessions: Vec<TerminalSession> = store
+fn load_sessions(store: Option<&StateStore>) -> Vec<WorkspaceSession> {
+    let sessions: Vec<WorkspaceSession> = store
         .and_then(|store| match store.load_or_recover() {
             Ok(state) => Some(
                 state
@@ -159,7 +165,7 @@ fn load_sessions(store: Option<&StateStore>) -> Vec<TerminalSession> {
                     .workspaces
                     .into_iter()
                     .flat_map(|workspace| workspace.sessions)
-                    .map(saved_session_to_terminal)
+                    .map(WorkspaceSession::from)
                     .collect(),
             ),
             Err(error) => {
@@ -170,11 +176,7 @@ fn load_sessions(store: Option<&StateStore>) -> Vec<TerminalSession> {
         .unwrap_or_default();
 
     if sessions.is_empty() {
-        vec![TerminalSession::new(
-            "session-1",
-            "Session 1",
-            TerminalCommand::user_shell(),
-        )]
+        vec![WorkspaceSession::shell("session-1", "Session 1")]
     } else {
         sessions
     }
@@ -183,31 +185,19 @@ fn load_sessions(store: Option<&StateStore>) -> Vec<TerminalSession> {
 fn append_session(
     sidebar: &gtk::ListBox,
     terminal_stack: &gtk::Stack,
-    sessions: &Rc<RefCell<Vec<TerminalSession>>>,
-    session: TerminalSession,
+    sessions: &Rc<RefCell<Vec<WorkspaceSession>>>,
+    session: WorkspaceSession,
 ) {
     let row = gtk::ListBoxRow::new();
     row.set_child(Some(
         &gtk::Label::builder()
-            .label(&session.title)
+            .label(&session.terminal.title)
             .xalign(0.0)
             .build(),
     ));
     sidebar.append(&row);
 
-    let terminal = terminal::terminal(&session);
-    terminal_stack.add_titled(&terminal, Some(&session.id), &session.title);
+    let terminal = terminal::terminal(&session.terminal);
+    terminal_stack.add_titled(&terminal, Some(&session.terminal.id), &session.terminal.title);
     sessions.borrow_mut().push(session);
-}
-
-fn saved_session_to_terminal(session: SavedSession) -> TerminalSession {
-    TerminalSession::new(
-        session.id,
-        session.title,
-        TerminalCommand {
-            program: session.program,
-            args: session.args,
-            working_directory: session.working_directory,
-        },
-    )
 }
