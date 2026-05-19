@@ -34,7 +34,44 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      linux_only: ${{ steps.detect.outputs.linux_only }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Detect Linux-only pull request
+        id: detect
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "linux_only=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          linux_only=true
+          saw_file=false
+          while IFS= read -r path; do
+            saw_file=true
+            case "$path" in
+              linux/*|packaging/arch/*|docs/linux-port/*) ;;
+              *) linux_only=false ;;
+            esac
+          done < <(gh pr diff "$PR_NUMBER" --name-only)
+
+          if [ "$saw_file" != true ]; then
+            linux_only=false
+          fi
+          echo "linux_only=$linux_only" >> "$GITHUB_OUTPUT"
+
   activation-session:
+    needs: changes
+    if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.linux_only != 'true' }}
     runs-on: ${{ inputs.runner || 'warp-macos-15-arm64-6x' }}
     timeout-minutes: 45
     env:
