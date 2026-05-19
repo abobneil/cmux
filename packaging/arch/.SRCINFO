@@ -1,0 +1,21 @@
+pkgbase = cmux-git
+	pkgdesc = Linux GTK port of cmux, a terminal workspace for AI coding agents
+	pkgver = 0.1.0.r0.g0000000
+	pkgrel = 1
+	url = https://github.com/abobneil/cmux
+	arch = x86_64
+	arch = aarch64
+	license = GPL-3.0-or-later
+	makedepends = cargo
+	makedepends = git
+	makedepends = pkgconf
+	checkdepends = desktop-file-utils
+	depends = gtk4
+	depends = libadwaita
+	depends = vte4
+	provides = cmux
+	conflicts = cmux
+	source = git+https://github.com/abobneil/cmux.git
+	sha256sums = SKIP
+
+pkgname = cmux-git
