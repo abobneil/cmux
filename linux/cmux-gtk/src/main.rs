@@ -1,10 +1,11 @@
 mod notifications;
 mod terminal;
 
-use std::{cell::Cell, rc::Rc};
+use std::{cell::RefCell, rc::Rc};
 
 use adw::prelude::*;
 use cmux_core::{
+    storage::{SavedSession, SavedState, StateStore},
     terminal::{TerminalCommand, TerminalSession},
     APP_ID,
 };
@@ -18,11 +19,11 @@ fn main() -> glib::ExitCode {
 
 fn build_ui(app: &adw::Application) {
     let header = adw::HeaderBar::new();
-    let new_session_button = gtk::Button::builder()
-        .icon_name("tab-new-symbolic")
-        .tooltip_text("New terminal session")
+    let add_button = gtk::Button::builder()
+        .icon_name("list-add-symbolic")
+        .tooltip_text("New shell")
         .build();
-    header.pack_start(&new_session_button);
+    header.pack_start(&add_button);
 
     let sidebar = gtk::ListBox::new();
     sidebar.add_css_class("navigation-sidebar");
@@ -35,19 +36,25 @@ fn build_ui(app: &adw::Application) {
         .transition_type(gtk::StackTransitionType::Crossfade)
         .build();
 
-    let next_session_number = Rc::new(Cell::new(1_u32));
-    add_session(&sidebar, &terminal_stack, &next_session_number);
-    add_session(&sidebar, &terminal_stack, &next_session_number);
+    let store = StateStore::xdg().ok();
+    let initial_sessions = load_sessions(store.as_ref());
+    let sessions = Rc::new(RefCell::new(Vec::<TerminalSession>::new()));
 
-    if let Some(row) = sidebar.row_at_index(0) {
-        sidebar.select_row(Some(&row));
+    for session in initial_sessions {
+        append_session(&sidebar, &terminal_stack, &sessions, session);
     }
+    sidebar.select_row(sidebar.row_at_index(0).as_ref());
 
     {
         let terminal_stack = terminal_stack.clone();
+        let sessions = Rc::clone(&sessions);
         sidebar.connect_row_selected(move |_, row| {
-            if let Some(row) = row {
-                terminal_stack.set_visible_child_name(&session_id_for_row(row));
+            let Some(row) = row else {
+                return;
+            };
+            let index = usize::try_from(row.index()).expect("GTK row indexes are non-negative");
+            if let Some(session) = sessions.borrow().get(index) {
+                terminal_stack.set_visible_child_name(&session.id);
             }
         });
     }
@@ -55,10 +62,18 @@ fn build_ui(app: &adw::Application) {
     {
         let sidebar = sidebar.clone();
         let terminal_stack = terminal_stack.clone();
-        let next_session_number = Rc::clone(&next_session_number);
-        new_session_button.connect_clicked(move |_| {
-            let row = add_session(&sidebar, &terminal_stack, &next_session_number);
-            sidebar.select_row(Some(&row));
+        let sessions = Rc::clone(&sessions);
+        add_button.connect_clicked(move |_| {
+            let next = sessions.borrow().len() + 1;
+            let session = TerminalSession::new(
+                format!("session-{next}"),
+                format!("Session {next}"),
+                TerminalCommand::user_shell(),
+            );
+            append_session(&sidebar, &terminal_stack, &sessions, session);
+            let last_index =
+                i32::try_from(sessions.borrow().len() - 1).expect("session count fits i32");
+            sidebar.select_row(sidebar.row_at_index(last_index).as_ref());
         });
     }
 
@@ -82,37 +97,81 @@ fn build_ui(app: &adw::Application) {
         .content(&toolbar)
         .build();
 
+    if let Some(store) = store {
+        let sessions = Rc::clone(&sessions);
+        window.connect_close_request(move |_| {
+            let state = SavedState {
+                sessions: sessions.borrow().iter().map(SavedSession::from).collect(),
+                ..SavedState::default()
+            };
+            if let Err(error) = store.save(&state) {
+                eprintln!("failed to save cmux state: {error}");
+            }
+            glib::Propagation::Proceed
+        });
+    }
+
     window.present();
 }
 
-fn add_session(
+fn load_sessions(store: Option<&StateStore>) -> Vec<TerminalSession> {
+    let sessions: Vec<TerminalSession> = store
+        .and_then(|store| match store.load_or_recover() {
+            Ok(state) => Some(
+                state
+                    .migrated()
+                    .workspaces
+                    .into_iter()
+                    .flat_map(|workspace| workspace.sessions)
+                    .map(saved_session_to_terminal)
+                    .collect(),
+            ),
+            Err(error) => {
+                eprintln!("failed to load cmux state: {error}");
+                None
+            }
+        })
+        .unwrap_or_default();
+
+    if sessions.is_empty() {
+        vec![TerminalSession::new(
+            "session-1",
+            "Session 1",
+            TerminalCommand::user_shell(),
+        )]
+    } else {
+        sessions
+    }
+}
+
+fn append_session(
     sidebar: &gtk::ListBox,
     terminal_stack: &gtk::Stack,
-    next_session_number: &Cell<u32>,
-) -> gtk::ListBoxRow {
-    let session_number = next_session_number.get();
-    next_session_number.set(session_number + 1);
-
-    let session_id = format!("session-{session_number}");
-    let title = format!("Session {session_number}");
-    let session = TerminalSession::new(
-        session_id.clone(),
-        title.clone(),
-        TerminalCommand::user_shell(),
-    );
-
+    sessions: &Rc<RefCell<Vec<TerminalSession>>>,
+    session: TerminalSession,
+) {
     let row = gtk::ListBoxRow::new();
-    row.set_widget_name(&session_id);
     row.set_child(Some(
-        &gtk::Label::builder().label(&title).xalign(0.0).build(),
+        &gtk::Label::builder()
+            .label(&session.title)
+            .xalign(0.0)
+            .build(),
     ));
     sidebar.append(&row);
 
     let terminal = terminal::terminal(&session);
-    terminal_stack.add_titled(&terminal, Some(&session_id), &title);
-    row
+    terminal_stack.add_titled(&terminal, Some(&session.id), &session.title);
+    sessions.borrow_mut().push(session);
 }
 
-fn session_id_for_row(row: &gtk::ListBoxRow) -> glib::GString {
-    row.widget_name()
+fn saved_session_to_terminal(session: SavedSession) -> TerminalSession {
+    TerminalSession::new(
+        session.id,
+        session.title,
+        TerminalCommand {
+            program: session.program,
+            args: session.args,
+            working_directory: session.working_directory,
+        },
+    )
 }
