@@ -7,7 +7,8 @@ arch=('x86_64' 'aarch64')
 url='https://github.com/abobneil/cmux'
 license=('GPL-3.0-or-later')
 depends=('gtk4' 'libadwaita' 'vte4')
-makedepends=('cargo' 'git')
+makedepends=('cargo' 'git' 'pkgconf')
+checkdepends=('desktop-file-utils')
 provides=('cmux')
 conflicts=('cmux')
 source=('git+https://github.com/abobneil/cmux.git')
@@ -20,17 +21,19 @@ pkgver() {
 
 prepare() {
   cd cmux/linux
-  cargo fetch --locked || cargo fetch
+  cargo fetch --locked
 }
 
 build() {
   cd cmux/linux
-  cargo build --release --workspace
+  cargo build --release --locked --workspace
 }
 
 check() {
-  cd cmux/linux
-  cargo test --workspace
+  cd cmux
+  desktop-file-validate packaging/arch/cmux.desktop
+  cd linux
+  cargo test --locked --workspace
 }
 
 package() {
